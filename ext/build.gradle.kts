@@ -26,7 +26,7 @@ dependencies {
     api("org.json:json:20231013")
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.8.1")
-    testImplementation("com.github.brahmkshatriya:echo:$libVersion")
+    testImplementation("com.github.rebelonion:echo:feat-controller-extension-SNAPSHOT")
 }
 
 // Extension properties goto `gradle.properties` to set values

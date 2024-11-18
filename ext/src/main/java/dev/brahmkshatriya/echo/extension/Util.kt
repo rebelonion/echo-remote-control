@@ -1,7 +1,7 @@
 package dev.brahmkshatriya.echo.extension
 
 import dev.brahmkshatriya.echo.config.BuildConfig
-import dev.brahmkshatriya.echo.extension.LastFMAPI.Companion.PLUGIN_IDENTIFIER
+import dev.brahmkshatriya.echo.extension.RemoteControl.Companion.PLUGIN_IDENTIFIER
 import org.json.JSONObject
 
 /**
