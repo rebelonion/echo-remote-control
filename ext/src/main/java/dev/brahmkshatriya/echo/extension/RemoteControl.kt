@@ -56,6 +56,7 @@ class RemoteControl : ExtensionClient, ControllerClient {
             super.onFailure(webSocket, t, response)
             log("WebSocket failed: $t")
             websocket = null
+            throw t
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -127,12 +128,12 @@ class RemoteControl : ExtensionClient, ControllerClient {
     }
 
     private fun trackToSTrack(track: Track): STrack {
-        val imageHolder = (track.album?.cover as? ImageHolder.UrlRequestImageHolder)?.request?.url ?:
-        (track.album?.cover as? ImageHolder.UriImageHolder)?.uri?.toString() ?: ""
+        val imageHolder = (track.cover as? ImageHolder.UrlRequestImageHolder)?.request?.url ?:
+        (track.cover as? ImageHolder.UriImageHolder)?.uri?.toString() ?: ""
         return STrack(
             id = track.id,
             title = track.title,
-            artist = track.album?.artists?.joinToString { it.name + " " } ?: "Unknown",
+            artist = track.artists.joinToString { it.name + " " },
             album = track.album?.title ?: "Unknown",
             duration = track.duration?.toDouble() ?: 0.0,
             artworkUrl = imageHolder
