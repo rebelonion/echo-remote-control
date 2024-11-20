@@ -28,7 +28,6 @@ class RemoteControl : ExtensionClient, ControllerClient {
         val url = setting.getString("remote_control_server_url") ?: defaultUrl
         val subPath = setting.getString("remote_control_server_sub_path") ?: defaultSubPath
         val port = setting.getString("remote_control_server_port") ?: defaultPort
-        val channelKey = setting.getString("remote_control_server_channel_key") ?: defaultChannelKey
 
         val wsUrl = "ws://$url:$port/$subPath"
         val request = okhttp3.Request.Builder().url(wsUrl).build()
@@ -56,7 +55,6 @@ class RemoteControl : ExtensionClient, ControllerClient {
             super.onFailure(webSocket, t, response)
             log("WebSocket failed: $t")
             websocket = null
-            throw t
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
