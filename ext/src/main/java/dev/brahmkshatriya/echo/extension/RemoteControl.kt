@@ -1,7 +1,10 @@
 package dev.brahmkshatriya.echo.extension
 
+import dev.brahmkshatriya.echo.common.clients.CloseableClient
 import dev.brahmkshatriya.echo.common.clients.ControllerClient
 import dev.brahmkshatriya.echo.common.clients.ExtensionClient
+import dev.brahmkshatriya.echo.common.clients.MessagePostClient
+import dev.brahmkshatriya.echo.common.clients.SettingsChangeListenerClient
 import dev.brahmkshatriya.echo.common.models.ImageHolder
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.settings.Setting
@@ -10,35 +13,66 @@ import dev.brahmkshatriya.echo.common.settings.SettingTextInput
 import dev.brahmkshatriya.echo.common.settings.Settings
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.collections.joinToString
 
-class RemoteControl : ExtensionClient, ControllerClient {
+class RemoteControl : CloseableClient, ExtensionClient, SettingsChangeListenerClient, MessagePostClient, ControllerClient() {
+    override var runsDuringPause: Boolean = true
+
+    private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+    val connecting: AtomicBoolean = AtomicBoolean(false)
 
     private var websocket: WebSocket? = null
     private val json = Json {
         ignoreUnknownKeys = true
         classDiscriminator = "type"
     }
-    override suspend fun onExtensionSelected() {
-        val url = setting.getString("remote_control_server_url") ?: defaultUrl
-        val subPath = setting.getString("remote_control_server_sub_path") ?: defaultSubPath
-        val port = setting.getString("remote_control_server_port") ?: defaultPort
 
-        val wsUrl = "ws://$url:$port/$subPath"
-        val request = okhttp3.Request.Builder().url(wsUrl).build()
-        val client = okhttp3.OkHttpClient()
-        client.newWebSocket(request, listener)
-        log("Connecting to $wsUrl")
+    private var messageHandler: ((String) -> Unit)? = null
+    override fun setMessageHandler(handler: (String) -> Unit) {
+        messageHandler = handler
+    }
+    private var lastMessageTime = System.currentTimeMillis()
+    private val minMessageInterval = 5000L
+    override fun postMessage(message: String) {
+        val currentTime = System.currentTimeMillis()
+        if (currentTime - lastMessageTime > minMessageInterval) {
+            messageHandler?.invoke(message)
+            lastMessageTime = currentTime
+        }
     }
 
-    val listener = object : WebSocketListener() {
+    private var stopped = false
+    override fun close() {
+        stopped = true
+        log("Closing extension")
+        scope.cancel()
+        websocket?.let {
+            it.close(1000, "Extension closed")
+            websocket = null
+        }
+        connecting.set(false)
+    }
+
+    override suspend fun onExtensionSelected() {
+        connect(reconnect = false)
+    }
+
+    override suspend fun onSettingsChanged(settings: Settings, key: String?) {
+        connect(reconnect = true)
+    }
+
+    private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             websocket = webSocket
+            connecting.set(false)
             val connectMessage = Message.AppConnect(
                 existingKey = setting.getString("remote_control_server_channel_key")
             )
@@ -48,13 +82,17 @@ class RemoteControl : ExtensionClient, ControllerClient {
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             super.onClosed(webSocket, code, reason)
             log("WebSocket closed: $code $reason")
+            postMessage("Disconnected from server")
             websocket = null
+            connecting.set(false)
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             super.onFailure(webSocket, t, response)
             log("WebSocket failed: $t")
+            postMessage("Failed to connect to server")
             websocket = null
+            connecting.set(false)
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -73,8 +111,27 @@ class RemoteControl : ExtensionClient, ControllerClient {
         }
     }
 
+    private fun connect(reconnect: Boolean) {
+        if (connecting.getAndSet(true)) {
+            return
+        }
+        if ((websocket != null && !reconnect) || stopped) {
+            return
+        }
+        websocket?.close(1000, "Reconnecting")
+        val url = setting.getString("remote_control_server_url") ?: defaultUrl
+        val subPath = setting.getString("remote_control_server_sub_path") ?: defaultSubPath
+        val port = setting.getString("remote_control_server_port") ?: defaultPort
+        val wsUrl =
+            "ws://$url${if (port.isNotEmpty()) ":$port" else ""}${if (subPath.isNotEmpty()) "/$subPath" else ""}"
+        val request = okhttp3.Request.Builder().url(wsUrl).build()
+        val client = okhttp3.OkHttpClient()
+        client.newWebSocket(request, listener)
+        log("connecting to $wsUrl")
+    }
+
     private fun handleMessage(message: Message) {
-        CoroutineScope(Dispatchers.IO).launch {
+        scope.launch(Dispatchers.IO) {
             when (message) {
                 is Message.AppConnectResponse -> {
                     if (message.success) {
@@ -111,11 +168,28 @@ class RemoteControl : ExtensionClient, ControllerClient {
                 }
 
                 is Message.RepeatCommand -> {
-                    onRepeatModeRequest?.invoke(message.mode.ordinal)
+                    onRepeatModeRequest?.invoke(message.mode)
                 }
 
                 is Message.VolumeCommand -> {
                     onVolumeRequest?.invoke(message.volume)
+                }
+
+                is Message.RequestCurrentState -> {
+                    val state = onRequestState?.invoke()
+                    if (state != null) {
+                        val playerState = Message.PlayerState(
+                            isPlaying = state.isPlaying,
+                            currentTrack = trackToSTrack(state.currentTrack),
+                            currentPosition = state.currentPosition,
+                            playlist = state.playlist.map { trackToSTrack(it) },
+                            currentIndex = state.currentIndex,
+                            shuffle = state.shuffle,
+                            repeatMode = state.repeatMode,
+                            volume = state.volume
+                        )
+                        sendMessage(playerState)
+                    }
                 }
 
                 else -> {
@@ -125,9 +199,19 @@ class RemoteControl : ExtensionClient, ControllerClient {
         }
     }
 
-    private fun trackToSTrack(track: Track): STrack {
-        val imageHolder = (track.cover as? ImageHolder.UrlRequestImageHolder)?.request?.url ?:
-        (track.cover as? ImageHolder.UriImageHolder)?.uri?.toString() ?: ""
+    private fun trackToSTrack(track: Track?): STrack {
+        if (track == null) {
+            return STrack(
+                id = "",
+                title = "",
+                artist = "",
+                album = "",
+                duration = 0.0,
+                artworkUrl = ""
+            )
+        }
+        val imageHolder = (track.cover as? ImageHolder.UrlRequestImageHolder)?.request?.url
+            ?: (track.cover as? ImageHolder.UriImageHolder)?.uri ?: ""
         return STrack(
             id = track.id,
             title = track.title,
@@ -139,29 +223,23 @@ class RemoteControl : ExtensionClient, ControllerClient {
     }
 
     private fun sendMessage(message: Message) {
-        val messageJson = json.encodeToString(Message.serializer(), message)
-        websocket?.send(messageJson)
+        if (stopped) return
+        if (websocket == null) {
+            connect(reconnect = true)
+            log("WebSocket not connected, reconnecting")
+        } else {
+            val messageJson = json.encodeToString(Message.serializer(), message)
+            websocket?.send(messageJson)
+        }
     }
-
-    override var onPlayRequest: (suspend () -> Unit)? = null
-    override var onPauseRequest: (suspend () -> Unit)? = null
-    override var onNextRequest: (suspend () -> Unit)? = null
-    override var onPreviousRequest: (suspend () -> Unit)? = null
-    override var onSeekRequest: (suspend (Double) -> Unit)? = null
-    override var onMovePlaylistItemRequest: (suspend (Int, Int) -> Unit)? = null
-    override var onRemovePlaylistItemRequest: (suspend (Int) -> Unit)? = null
-    override var onShuffleModeRequest: (suspend (Boolean) -> Unit)? = null
-    override var onRepeatModeRequest: (suspend (Int) -> Unit)? = null
-    override var onVolumeRequest: (suspend (Double) -> Unit)? = null
 
     override suspend fun onPlaybackStateChanged(
         isPlaying: Boolean,
-        position: Double,
-        track: Track
+        position: Long,
+        track: Track?
     ) {
-        val state = if (isPlaying) PlaybackState.PLAYING else PlaybackState.PAUSED
         val message = Message.PlaybackStateUpdate(
-            state = state,
+            isPlaying = isPlaying,
             currentPosition = position,
             track = trackToSTrack(track)
         )
@@ -171,18 +249,12 @@ class RemoteControl : ExtensionClient, ControllerClient {
     override suspend fun onPlaylistChanged(playlist: List<Track>) {
         val message = Message.PlaylistUpdate(
             tracks = playlist.map { trackToSTrack(it) },
-            currentIndex = 0  // You might want to pass the current index as a parameter
+            currentIndex = 0
         )
         sendMessage(message)
     }
 
-    override suspend fun onPlaybackModeChanged(isShuffle: Boolean, repeatState: Int) {
-        val repeatMode = when (repeatState) {
-            0 -> RepeatMode.OFF
-            1 -> RepeatMode.ALL
-            2 -> RepeatMode.ONE
-            else -> RepeatMode.OFF
-        }
+    override suspend fun onPlaybackModeChanged(isShuffle: Boolean, repeatMode: RepeatMode) {
         val message = Message.PlaybackModeUpdate(
             shuffle = isShuffle,
             repeatMode = repeatMode
@@ -190,7 +262,7 @@ class RemoteControl : ExtensionClient, ControllerClient {
         sendMessage(message)
     }
 
-    override suspend fun onPositionChanged(position: Double) {
+    override suspend fun onPositionChanged(position: Long) {
         val message = Message.PositionUpdate(position = position)
         sendMessage(message)
     }
@@ -200,10 +272,10 @@ class RemoteControl : ExtensionClient, ControllerClient {
         sendMessage(message)
     }
 
-    val defaultUrl = "100.90.151.30"
-    val defaultSubPath = "ws"
-    val defaultPort = "8080"
-    val defaultChannelKey = ""
+    private val defaultUrl = "100.90.151.30"
+    private val defaultSubPath = "ws"
+    private val defaultPort = "8080"
+    private val defaultChannelKey = ""
     override val settingItems: List<Setting>
         get() = listOf(
             SettingCategory(

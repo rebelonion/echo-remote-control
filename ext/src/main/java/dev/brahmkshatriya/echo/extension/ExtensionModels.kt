@@ -1,5 +1,6 @@
 package dev.brahmkshatriya.echo.extension
 
+import dev.brahmkshatriya.echo.common.clients.ControllerClient.RepeatMode
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
@@ -19,20 +20,6 @@ data class STrack(
     @SerialName("artworkUrl")
     val artworkUrl: String? = null
 )
-
-// Playback state enums
-@Serializable
-enum class PlaybackState {
-    PLAYING,
-    PAUSED
-}
-
-@Serializable
-enum class RepeatMode {
-    OFF,
-    ALL,
-    ONE
-}
 
 @Serializable
 sealed interface Message {
@@ -65,10 +52,10 @@ sealed interface Message {
     @Serializable
     @SerialName("PlaybackStateUpdate")
     data class PlaybackStateUpdate(
-        @SerialName("state")
-        val state: PlaybackState,
+        @SerialName("isPlaying")
+        val isPlaying: Boolean,
         @SerialName("currentPosition")
-        val currentPosition: Double,  // in milliseconds
+        val currentPosition: Long,  // in milliseconds
         @SerialName("track")
         val track: STrack
     ) : Message
@@ -95,7 +82,7 @@ sealed interface Message {
     @SerialName("PositionUpdate")
     data class PositionUpdate(
         @SerialName("position")
-        val position: Double  // in milliseconds
+        val position: Long  // in milliseconds
     ) : Message
 
     @Serializable
@@ -125,7 +112,7 @@ sealed interface Message {
     @SerialName("SeekCommand")
     data class SeekCommand(
         @SerialName("position")
-        val position: Double  // in milliseconds
+        val position: Long  // in milliseconds
     ) : Message
 
     // Controller -> App: Playlist Commands
@@ -171,7 +158,20 @@ sealed interface Message {
     // Controller -> App: Request States
     @Serializable
     @SerialName("RequestCurrentState")
-    object RequestCurrentState : Message
+    data object RequestCurrentState : Message
+
+    @Serializable
+    @SerialName("PlayerState")
+    data class PlayerState(
+        val isPlaying: Boolean = false,
+        val currentTrack: STrack? = null,
+        val currentPosition: Long = 0,
+        val playlist: List<STrack> = emptyList(),
+        val currentIndex: Int = 0,
+        val shuffle: Boolean = false,
+        val repeatMode: RepeatMode = RepeatMode.OFF,
+        val volume: Double = 0.0
+    ) : Message
 
     // Error messages
     @Serializable
@@ -193,16 +193,3 @@ sealed interface Message {
         }
     }
 }
-
-// Current state model (useful for maintaining server-side state)
-@Serializable
-data class PlayerState(
-    val playbackState: PlaybackState = PlaybackState.PAUSED,
-    val currentTrack: STrack? = null,
-    val currentPosition: Double = 0.0,
-    val playlist: List<STrack> = emptyList(),
-    val currentIndex: Int = 0,
-    val shuffle: Boolean = false,
-    val repeatMode: RepeatMode = RepeatMode.OFF,
-    val volume: Double = 1.0
-)

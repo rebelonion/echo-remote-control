@@ -1,6 +1,5 @@
 package dev.brahmkshatriya.echo.extension
 
-import dev.brahmkshatriya.echo.config.BuildConfig
 import dev.brahmkshatriya.echo.extension.RemoteControl.Companion.PLUGIN_IDENTIFIER
 import org.json.JSONObject
 
@@ -9,9 +8,7 @@ import org.json.JSONObject
  * @param message The message to log.
  */
 fun log(message: String) {
-    if (BuildConfig.isDebug()) {
-        println("$PLUGIN_IDENTIFIER: $message")
-    }
+    println("$PLUGIN_IDENTIFIER: $message")
 }
 
 /**
