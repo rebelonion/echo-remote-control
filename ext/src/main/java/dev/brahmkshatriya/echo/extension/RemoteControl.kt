@@ -9,6 +9,7 @@ import dev.brahmkshatriya.echo.common.models.ImageHolder
 import dev.brahmkshatriya.echo.common.models.Track
 import dev.brahmkshatriya.echo.common.settings.Setting
 import dev.brahmkshatriya.echo.common.settings.SettingCategory
+import dev.brahmkshatriya.echo.common.settings.SettingSwitch
 import dev.brahmkshatriya.echo.common.settings.SettingTextInput
 import dev.brahmkshatriya.echo.common.settings.Settings
 import kotlinx.coroutines.CoroutineScope
@@ -23,7 +24,8 @@ import okhttp3.WebSocketListener
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.collections.joinToString
 
-class RemoteControl : CloseableClient, ExtensionClient, SettingsChangeListenerClient, MessagePostClient, ControllerClient() {
+class RemoteControl : CloseableClient, ExtensionClient, SettingsChangeListenerClient,
+    MessagePostClient, ControllerClient() {
     override var runsDuringPause: Boolean = true
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
@@ -39,14 +41,18 @@ class RemoteControl : CloseableClient, ExtensionClient, SettingsChangeListenerCl
     override fun setMessageHandler(handler: (String) -> Unit) {
         messageHandler = handler
     }
-    private var lastMessageTime = System.currentTimeMillis()
+
+    private var lastMessageTime = 0L
     private val minMessageInterval = 5000L
-    override fun postMessage(message: String) {
+    private fun postMessage(message: String, prioritized: Boolean = false) {
         val currentTime = System.currentTimeMillis()
-        if (currentTime - lastMessageTime > minMessageInterval) {
+        if (prioritized || currentTime - lastMessageTime > minMessageInterval) {
             messageHandler?.invoke(message)
             lastMessageTime = currentTime
         }
+    }
+    override fun postMessage(message: String) {
+        postMessage(message, prioritized = false)
     }
 
     private var stopped = false
@@ -122,8 +128,19 @@ class RemoteControl : CloseableClient, ExtensionClient, SettingsChangeListenerCl
         val url = setting.getString("remote_control_server_url") ?: defaultUrl
         val subPath = setting.getString("remote_control_server_sub_path") ?: defaultSubPath
         val port = setting.getString("remote_control_server_port") ?: defaultPort
-        val wsUrl =
-            "ws://$url${if (port.isNotEmpty()) ":$port" else ""}${if (subPath.isNotEmpty()) "/$subPath" else ""}"
+        val useWss = setting.getBoolean("remote_control_server_secure") ?: defaultUseWss
+        val shouldShowPort = when {
+            useWss && port != "443" -> true
+            !useWss && port != "80" -> true
+            else -> false
+        }
+        val wsUrl = buildString {
+            append("ws")
+            if (useWss) append("s")
+            append("://${url.trim()}")
+            if (shouldShowPort && port.isNotEmpty()) append(":${port.trim()}")
+            if (subPath.isNotEmpty()) append("/${subPath.trimStart('/')}")
+        }
         val request = okhttp3.Request.Builder().url(wsUrl).build()
         val client = okhttp3.OkHttpClient()
         client.newWebSocket(request, listener)
@@ -136,7 +153,11 @@ class RemoteControl : CloseableClient, ExtensionClient, SettingsChangeListenerCl
                 is Message.AppConnectResponse -> {
                     if (message.success) {
                         log("Connected to server with key: ${message.key}")
-                        setting.putString("remote_control_server_channel_key", message.key)
+                        if (message.key != setting.getString("remote_control_server_channel_key")) {
+                            log("Saving new key")
+                            setting.putString("remote_control_server_channel_key", message.key)
+                            postMessage("Received new key: ${message.key}", prioritized = true)
+                        }
                     } else {
                         log("Failed to connect to server: ${message.error}")
                     }
@@ -272,9 +293,10 @@ class RemoteControl : CloseableClient, ExtensionClient, SettingsChangeListenerCl
         sendMessage(message)
     }
 
-    private val defaultUrl = "100.90.151.30"
+    private val defaultUrl = "ws.rebelonion.dev"
     private val defaultSubPath = "ws"
-    private val defaultPort = "8080"
+    private val defaultPort = "443"
+    private val defaultUseWss = false
     private val defaultChannelKey = ""
     override val settingItems: List<Setting>
         get() = listOf(
@@ -286,25 +308,31 @@ class RemoteControl : CloseableClient, ExtensionClient, SettingsChangeListenerCl
                         "Server URL",
                         "remote_control_server_url",
                         "The URL of the remote control server",
-                        setting.getString("remote_control_server_url") ?: defaultUrl
+                        defaultUrl
                     ),
                     SettingTextInput(
                         "Server Sub Path",
                         "remote_control_server_sub_path",
                         "The sub path of the remote control server (optional)",
-                        setting.getString("remote_control_server_sub_path") ?: defaultSubPath
+                        defaultSubPath
                     ),
                     SettingTextInput(
                         "Server Port",
                         "remote_control_server_port",
                         "The port of the remote control server",
-                        setting.getString("remote_control_server_port") ?: defaultPort
+                        defaultPort
+                    ),
+                    SettingSwitch(
+                        "Use secure connection",
+                        "remote_control_server_secure",
+                        "Use a secure connection (wss)",
+                        defaultUseWss
                     ),
                     SettingTextInput(
                         "Channel Key",
                         "remote_control_server_channel_key",
                         "The channel key of the remote control server (optional)",
-                        setting.getString("remote_control_server_channel_key") ?: defaultChannelKey
+                        defaultChannelKey
                     )
                 )
             )
